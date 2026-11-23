@@ -443,44 +443,48 @@ megabyte](#returning-more-than-one-megabyte). The file DuckDB reads can be an
 
 ## Reading an Iceberg table
 
-`iceberg_scan` reads an Apache Iceberg table from its metadata file, and
-`iceberg_snapshots` lists the table's snapshots. Neither needs a catalog
-service. This reads a table that PyIceberg wrote to local disk, so it needs
-`vsql_duckdb.allow_local_files = ON`:
+`iceberg_scan` reads an Apache Iceberg table, and `iceberg_snapshots` lists the
+table's snapshots. Neither needs a catalog service. DuckDB publishes a sample
+table as a zip file. Unzip it where the server can read it:
+
+```bash
+mkdir -p /tmp/vsql-iceberg && cd /tmp/vsql-iceberg
+curl -LO https://duckdb.org/data/iceberg_data.zip && unzip iceberg_data.zip
+```
+
+Reading from the server's disk needs `vsql_duckdb.allow_local_files = ON`,
+which lets any caller read any file the server process can read — see
+[Security Considerations](#security-considerations). The sample's metadata
+names its files by relative paths, so `allow_moved_paths := true` tells the
+reader to find them in the folder you give it:
 
 ```sql
-SELECT t.region, t.total
+SET GLOBAL vsql_duckdb.allow_local_files = ON;
+
+SELECT t.l_returnflag, t.n
 FROM JSON_TABLE(
-  duckdb_query('SELECT region, sum(amount) AS total
-                FROM iceberg_scan(''/data/warehouse/sales/orders/metadata/00002-659cb4e3-a116-4ae3-9a7e-47d846f82f57.metadata.json'')
-                GROUP BY region'),
-  '$[*]' COLUMNS (region VARCHAR(10) PATH '$.region', total DOUBLE PATH '$.total')) AS t
-ORDER BY t.total DESC;
+  duckdb_query('SELECT l_returnflag, count(*) AS n
+                FROM iceberg_scan(''/tmp/vsql-iceberg/data/iceberg/lineitem_iceberg'', allow_moved_paths := true)
+                GROUP BY l_returnflag ORDER BY l_returnflag'),
+  '$[*]' COLUMNS (l_returnflag VARCHAR(1) PATH '$.l_returnflag', n BIGINT PATH '$.n')) AS t;
 ```
 
 ```
-+--------+-------+
-| region | total |
-+--------+-------+
-| east   |  42.5 |
-| west   |    35 |
-| north  |     5 |
-+--------+-------+
++--------------+-------+
+| l_returnflag | n     |
++--------------+-------+
+| A            | 12800 |
+| N            | 26125 |
+| R            | 12868 |
++--------------+-------+
 ```
 
-Name the table's newest metadata file. A table copied from where it was written
-still names the old location in its metadata. Read it by its folder, name the
-metadata file in `version` without `.metadata.json`, and add
-`allow_moved_paths := true`:
-
-```sql
-SELECT duckdb_scalar('SELECT count(*) FROM iceberg_scan(''/data/copy/orders'',
-  version := ''00002-659cb4e3-a116-4ae3-9a7e-47d846f82f57'', allow_moved_paths := true)');
-```
-
-The reader also brings `iceberg_metadata`, the table maintenance functions,
-writes through `COPY ... TO ... (FORMAT iceberg)`, and `ATTACH` to an Iceberg
-REST catalog. Only the reads on this page were tested.
+A table read where it was written does not need an extra option. Pass its
+newest metadata file, such as
+`iceberg_scan('/data/warehouse/sales/orders/metadata/00002-<uuid>.metadata.json')`.
+To read a table that was copied somewhere else, pass three things: its folder,
+`allow_moved_paths := true`, and, when the folder has no `version-hint.text`,
+`version := '<newest metadata file name without .metadata.json>'`.
 
 ## Returning more than one megabyte
 
