@@ -110,7 +110,7 @@ SELECT duckdb_scalar(@total) AS total;
 eval SET @tls = CONCAT('SELECT length(content) FROM read_text(''https://127.0.0.1:', $http_port, '/duckdb_cities.json'')');
 --enable_query_log
 --replace_regex /IO Error: .*/IO Error: <TLS handshake failed>/
---error 3200
+--error ER_UDF_ERROR
 SELECT duckdb_scalar(@tls) AS tls;
 
 --echo #

@@ -139,6 +139,9 @@ std::string seal(duckdb::Connection &con, const Settings &s) {
     // about a second while every query waits on the engine lock.
     if (s.enable_external_access) {
       con.Query("SET SESSION http_retries = 0");
+      // A firewall that drops rather than refuses the packet would otherwise
+      // hold every query for httpfs's default 30 second timeout.
+      con.Query("SET SESSION http_timeout = 1");
       con.Query("SELECT 1 FROM read_blob('https://127.0.0.1:1/')");
     }
     auto res = con.Query("SET disabled_filesystems = 'LocalFileSystem'");

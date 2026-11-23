@@ -113,6 +113,7 @@ void duckdb_scalar_impl(StringArg sql, StringResult out) try {
   // every row of the result to read this one cell.
   duckdb::Value value;
   for (auto &chunk : outcome.result->Collection().Chunks()) {
+    if (chunk.size() == 0) continue;
     value = chunk.GetValue(0, 0);
     break;
   }
