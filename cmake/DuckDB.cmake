@@ -164,6 +164,14 @@ else()
          -DVCPKG_TOOLCHAIN_PATH=${VCPKG_TOOLCHAIN_PATH}
          -DCMAKE_TOOLCHAIN_FILE=${VCPKG_TOOLCHAIN_PATH})
   endif()
+  # avro-c is older C. It declares function pointers as `int (*)()`, which
+  # C23, GCC 15's default, reads as taking no arguments, and it passes
+  # callbacks whose pointer types GCC 14 and later reject as an error.
+  if("avro" IN_LIST DUCKDB_READERS)
+    list(APPEND _duckdb_cmake_args
+         -DCMAKE_C_STANDARD=17
+         -DCMAKE_C_FLAGS=-Wno-error=incompatible-pointer-types)
+  endif()
   if(_duckdb_needs_vcpkg)
     list(APPEND _duckdb_cmake_args
          -DVCPKG_MANIFEST_DIR=${CMAKE_CURRENT_LIST_DIR}/vcpkg
