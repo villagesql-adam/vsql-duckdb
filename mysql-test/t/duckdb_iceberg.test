@@ -1,0 +1,62 @@
+INSTALL EXTENSION vsql_duckdb;
+
+--echo #
+--echo # The bundle carries the iceberg reader and the avro reader it needs
+--echo #
+SELECT JSON_CONTAINS(JSON_EXTRACT(duckdb_status(), '$.readers'), '["avro", "iceberg"]') AS has_readers;
+
+# Reading a table from disk needs the local filesystem.
+SET GLOBAL vsql_duckdb.allow_local_files = ON;
+
+# The table was written elsewhere, so every read passes allow_moved_paths. Its
+# newest metadata file is current.metadata.json, which version := 'current'
+# selects.
+--source iceberg_orders.inc
+--exec python3 -B -c "import base64,io,sys,tarfile; d=sys.argv[1]; tarfile.open(fileobj=io.BytesIO(base64.b64decode(open(d+'/iceberg_orders.b64').read())),mode='r:gz').extractall(d+'/iceberg', filter='data')" $MYSQL_TMP_DIR
+
+--disable_query_log
+--let $table = $MYSQL_TMP_DIR/iceberg/orders
+eval SET @scan = 'iceberg_scan(''$table'', version := ''current'', allow_moved_paths := true)';
+eval SET @snapshots = 'iceberg_snapshots(''$table'', version := ''current'')';
+--enable_query_log
+
+--echo #
+--echo # The current snapshot holds all six orders
+--echo #
+SELECT duckdb_query(CONCAT('SELECT count(*) AS n, sum(amount) AS total FROM ', @scan)) AS current_rows;
+
+--echo #
+--echo # Both snapshots are listed
+--echo #
+SELECT duckdb_scalar(CONCAT('SELECT count(*) FROM ', @snapshots)) AS snapshots;
+
+--echo #
+--echo # A grouped total comes back as rows through JSON_TABLE
+--echo #
+SELECT jt.region, jt.total
+FROM JSON_TABLE(
+  duckdb_query(CONCAT('SELECT region, sum(amount) AS total FROM ', @scan, ' GROUP BY region')),
+  '$[*]' COLUMNS (region VARCHAR(10) PATH '$.region', total DOUBLE PATH '$.total')) AS jt
+ORDER BY jt.total DESC;
+
+--echo #
+--echo # With local files off, the table cannot be read
+--echo #
+SET GLOBAL vsql_duckdb.allow_local_files = OFF;
+--replace_regex /(has been disabled by configuration)[\s\S]*/\1/
+--error 3200
+SELECT duckdb_query(CONCAT('SELECT count(*) FROM ', @scan)) AS refused;
+
+--echo #
+--echo # With local files off, an Iceberg table cannot be written to disk
+--echo #
+--disable_query_log
+eval SET @copy = 'COPY (SELECT 1 AS a) TO ''$MYSQL_TMP_DIR/iceberg_out'' (FORMAT iceberg)';
+--enable_query_log
+--replace_regex /(has been disabled by configuration)[\s\S]*/\1/
+--error 3200
+SELECT duckdb_query(@copy) AS refused;
+
+--force-rmdir $MYSQL_TMP_DIR/iceberg
+--remove_file $MYSQL_TMP_DIR/iceberg_orders.b64
+UNINSTALL EXTENSION vsql_duckdb;

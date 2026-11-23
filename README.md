@@ -1,6 +1,6 @@
 # VillageSQL DuckDB Extension
 
-Aggregate Parquet, CSV and JSON files from an ordinary MySQL connection,
+Aggregate Parquet, CSV and JSON files and Iceberg tables from an ordinary MySQL connection,
 without exporting the data first or running a second query engine beside the
 database. It reads the files wherever they live — an `s3://` bucket, an
 `https://` URL, or the server's own disk — so where they are stored does not
@@ -63,24 +63,33 @@ first time and is then reused. Nothing is downloaded at run time.
 | A C++17 compiler and CMake 3.18 or newer | |
 | OpenSSL and libcurl development headers | DuckDB's HTTP reader uses both |
 | Git | DuckDB is fetched from its own repository at a pinned tag |
+| vcpkg | Builds the seven libraries that the Iceberg and Avro readers link, as static archives |
 
 Debian and Ubuntu:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y build-essential cmake git libssl-dev libcurl4-openssl-dev
+sudo apt-get install -y build-essential cmake git libssl-dev libcurl4-openssl-dev curl zip unzip tar
 ```
 
 RHEL and Fedora:
 
 ```bash
-sudo dnf install -y gcc-c++ cmake git openssl-devel libcurl-devel
+sudo dnf install -y gcc-c++ cmake git openssl-devel libcurl-devel curl zip unzip tar
 ```
 
 macOS, with Homebrew:
 
 ```bash
 brew install cmake openssl@3
+```
+
+vcpkg, on every system. The build finds it through `VCPKG_ROOT`:
+
+```bash
+git clone --branch 2026.10.16 https://github.com/microsoft/vcpkg "$HOME/vcpkg"
+"$HOME/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+export VCPKG_ROOT="$HOME/vcpkg"
 ```
 
 ### Build
@@ -109,9 +118,9 @@ the server where that is with `SHOW VARIABLES LIKE 'veb_dir'`.
 | Option | Default | Meaning |
 |---|---|---|
 | `DUCKDB_TAG` | `v2.0.1` | The DuckDB release to build against |
-| `DUCKDB_READERS` | `httpfs;json` | Which DuckDB readers to link in. `parquet` and `core_functions` are always present. Only the default pair works — see [Adding more readers](#adding-more-readers) |
+| `DUCKDB_READERS` | `httpfs;json;avro;iceberg` | Which DuckDB readers to link in. `parquet` and `core_functions` are always present. See [Adding more readers](#adding-more-readers) |
 | `DUCKDB_PREBUILT_ROOT` | empty | Reuse a DuckDB tree built earlier, instead of building one. `DUCKDB_READERS` must name exactly that tree's readers |
-| `VCPKG_TOOLCHAIN_PATH` | empty | Needed only by readers that depend on vcpkg packages |
+| `VCPKG_TOOLCHAIN_PATH` | `$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake` | Needed to build DuckDB with the `avro` or `iceberg` reader. Not needed with `DUCKDB_PREBUILT_ROOT`, because the prebuilt tree holds the libraries |
 
 ## Installing
 
@@ -432,6 +441,51 @@ rollups rather than raw rows — see [Returning more than one
 megabyte](#returning-more-than-one-megabyte). The file DuckDB reads can be an
 `https://` URL, an `s3://` path, or a local file; the outer join is the same.
 
+## Reading an Iceberg table
+
+`iceberg_scan` reads an Apache Iceberg table, and `iceberg_snapshots` lists the
+table's snapshots. Neither needs a catalog service. DuckDB publishes a sample
+table as a zip file. Unzip it where the server can read it:
+
+```bash
+mkdir -p /tmp/vsql-iceberg && cd /tmp/vsql-iceberg
+curl -LO https://duckdb.org/data/iceberg_data.zip && unzip iceberg_data.zip
+```
+
+Reading from the server's disk needs `vsql_duckdb.allow_local_files = ON`,
+which lets any caller read any file the server process can read — see
+[Security Considerations](#security-considerations). The sample's metadata
+names its files by relative paths, so `allow_moved_paths := true` tells the
+reader to find them in the folder you give it:
+
+```sql
+SET GLOBAL vsql_duckdb.allow_local_files = ON;
+
+SELECT t.l_returnflag, t.n
+FROM JSON_TABLE(
+  duckdb_query('SELECT l_returnflag, count(*) AS n
+                FROM iceberg_scan(''/tmp/vsql-iceberg/data/iceberg/lineitem_iceberg'', allow_moved_paths := true)
+                GROUP BY l_returnflag ORDER BY l_returnflag'),
+  '$[*]' COLUMNS (l_returnflag VARCHAR(1) PATH '$.l_returnflag', n BIGINT PATH '$.n')) AS t;
+```
+
+```
++--------------+-------+
+| l_returnflag | n     |
++--------------+-------+
+| A            | 12800 |
+| N            | 26125 |
+| R            | 12868 |
++--------------+-------+
+```
+
+A table read where it was written does not need an extra option. Pass its
+newest metadata file, such as
+`iceberg_scan('/data/warehouse/sales/orders/metadata/00002-<uuid>.metadata.json')`.
+To read a table that was copied somewhere else, pass three things: its folder,
+`allow_moved_paths := true`, and, when the folder has no `version-hint.text`,
+`version := '<newest metadata file name without .metadata.json>'`.
+
 ## Returning more than one megabyte
 
 `duckdb_query` refuses a result larger than one megabyte:
@@ -496,17 +550,22 @@ stable SDK offers it from protocol 5; this extension does not declare it yet.
 ## Adding more readers
 
 `DUCKDB_READERS` links a reader's `lib<name>_extension.a` into the extension.
-Only `httpfs` and `json` are known to work, alongside the always-present
-`parquet` and `core_functions`. That build takes 124 s cold on ten cores.
+The default four, `httpfs`, `json`, `avro` and `iceberg`, are known to work,
+alongside the always-present `parquet` and `core_functions`. The `iceberg`
+reader reads its manifest files through `avro`, so the two go together.
 
-The other four readers do not produce a working build today:
+The `avro` and `iceberg` readers link seven libraries: bzip2, jansson, liblzma,
+roaring, snappy, zlib and zstd. vcpkg builds them as static archives from the
+manifest in `cmake/vcpkg/vcpkg.json`, so the bundle does not depend on whichever
+copies a machine happens to have.
+
+The other three readers do not produce a working build today:
 
 | Reader | Where it stops |
 |---|---|
 | `delta` | Links only if `libdelta_kernel_ffi.a` (108 MB) and the platform frameworks its Rust half needs are added by hand |
 | `vortex` | The same, with `libvortex_duckdb.a` (128 MB). Its `libvortex_extension.a` is a shim holding no reader code |
-| `iceberg` | Does not configure without vcpkg, for `avro-c`, `roaring` and `aws-sdk-cpp`. The AWS dependency is not optional — see below |
-| `mysql_scanner` | Does not configure without vcpkg, for `libmariadb` |
+| `mysql_scanner` | Needs `libmariadb` from vcpkg, which `cmake/vcpkg/vcpkg.json` does not list |
 
 A Rust reader is two archives, and DuckDB installs only the C++ half into its
 install prefix. The link list here names only that half, which is why `delta`
@@ -515,22 +574,6 @@ the engine then starts with no readers at all and reports that it cannot load
 `parquet`. DuckDB loads its linked readers in one loop with no error handling,
 so one reader throwing during load leaves the engine with none of them; which
 of the two throws was not established.
-
-The `iceberg` reader needs a word, because its AWS dependency is not what it
-looks like. Its CMake asks for `AWSSDK` as `REQUIRED`, with no option to turn
-it off, and names the components `core`, `sso` and `sts` — the credential
-services. The file that uses them builds an AWS credential provider chain and
-signs requests with the SDK's own HTTP client, so the SDK is there to
-authenticate to an AWS-hosted catalog such as Glue or S3 Tables. It does not
-read Parquet; httpfs already does that, which is why no other reader wants any
-of it. There is no iceberg build without the AWS SDK, not even for a table on
-local disk.
-
-That is also the argument against building one. The Emscripten branch of its
-own `CMakeLists.txt` lists the set explicitly: 30 static archives, including
-eight `aws-cpp-sdk` components and its own `libssl` and `libcrypto`. Those two
-would put a second TLS stack inside `mysqld` beside the server's own OpenSSL,
-which is the same kind of problem as a second allocator.
 
 The `mysql_scanner` reader deserves a caution. It would let a DuckDB query
 `ATTACH` this server over its own connection and read your InnoDB tables, which
@@ -553,7 +596,8 @@ why it would stay out of the default build even once it configures.
 | `duckdb.create_simple_secret(...)` | `vsql_duckdb.s3_*` variables plus the keyring | No setting holds the secret; the variables only name the keyring entry that does |
 | MAP, union, JSON, time functions, `approx_count_distinct`, `TABLESAMPLE` | the same names, inside the query text | Reachable through `duckdb_query`, not as MySQL functions |
 | `duckdb.install_extension`, `load_extension`, `autoload_extension` | none | Refused by design. Readers ship inside the bundle. See Security Considerations |
-| `iceberg_scan`, `iceberg_metadata`, `iceberg_snapshots`, `delta_scan`, `read_vortex` | not in the default build | See [Adding more readers](#adding-more-readers) |
+| `iceberg_scan`, `iceberg_metadata`, `iceberg_snapshots` | the same names, inside the query text | See [Reading an Iceberg table](#reading-an-iceberg-table) |
+| `delta_scan`, `read_vortex` | not in the default build | See [Adding more readers](#adding-more-readers) |
 | `duckdb.create_azure_secret` | none | The Azure reader is not bundled |
 | `duckdb.enable_motherduck` and the other MotherDuck functions | none | Out of scope |
 | `duckdb.force_execution` | none | Routing ordinary SQL to DuckDB needs a server hook that does not exist |
@@ -641,7 +685,8 @@ SET PERSIST vsql_duckdb.s3_region = 'eu-north-1';
 | The function cannot tell it was killed | `KILL QUERY` does not reach it, so the extension keeps its own deadline in `timeout_ms` | [#454](https://github.com/villagesql/villagesql-server/issues/454) |
 | The deadline lands between units of work | DuckDB finishes the task in hand before the deadline is checked, so a query can run a little past `timeout_ms`. Measured at 1.016 s against a 1000 ms setting. Setting `timeout_ms` to `0` removes the bound, and then nothing stops a query short of restarting the server | Nothing; it is how DuckDB hands control back |
 | `duckdb_scalar` reads the whole result to return one value | A scalar over a large dataset builds the result in memory first. `memory_limit_mb` bounds it | Streaming the first chunk instead |
-| Only four readers work | `httpfs`, `json`, `parquet` and `core_functions`. Delta, Vortex, Iceberg and `mysql_scanner` all fail to build or to start — see [Adding more readers](#adding-more-readers) | Link wiring for the Rust archives, and vcpkg for the other two |
+| Six readers work | `httpfs`, `json`, `parquet`, `core_functions`, `avro` and `iceberg`. Delta, Vortex and `mysql_scanner` fail to build or to start — see [Adding more readers](#adding-more-readers) | Link wiring for the Rust archives, and the `libmariadb` dependency for `mysql_scanner` |
+| Iceberg reads were tested on local disk only | Reading a table in object storage, Iceberg writes, and an Iceberg REST catalog through `ATTACH` were not tested | Testing them |
 | The version stays below 1.0.0 | The extension declares the `sys_var` and `keyring` preview capabilities, and either may change under it | Those two capabilities reaching general availability |
 | Reinstalling resets the settings | `UNINSTALL` then `INSTALL` puts every variable back to its default. `UNINSTALL` also deletes them from `mysqld-auto.cnf`, so a restart does not bring a `SET PERSIST` value back | Re-apply them |
 | Local files and spilling are one switch | `allow_local_files = OFF` also stops DuckDB spilling to disk | Nothing; DuckDB gates both through one setting |
@@ -715,7 +760,8 @@ Within that, the engine is closed as tightly as DuckDB allows.
   `threads`, since the server accounts for neither.
 
 Two things to keep in mind when you configure it. A credential with write
-permission lets a caller write to your bucket through `COPY ... TO`; give the
+permission lets a caller write to your bucket through `COPY ... TO` or the
+Iceberg maintenance functions; give the
 key read-only permission unless you need otherwise. And turning on
 `allow_local_files` lets any caller read any file the server process can read,
 which on most hosts includes the database's own data directory.

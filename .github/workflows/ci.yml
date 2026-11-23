@@ -7,6 +7,8 @@ env:
   # standalone build must not see it, or it would reuse a tree it is supposed
   # to be producing.
   DUCKDB_STAGE: /home/runner/duckdb-stage
+  # The vcpkg release that builds the libraries in cmake/vcpkg/vcpkg.json.
+  VCPKG_TAG: 2026.10.16
 
 jobs:
   build-and-test:
@@ -24,15 +26,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libcurl4-openssl-dev libssl-dev
 
-      # DuckDB takes minutes to build and changes only when the tag or the
-      # reader list changes, so the key is built from exactly those two.
+      # DuckDB takes minutes to build and changes only when the tag, the
+      # reader list, the vcpkg release or the vcpkg manifest changes, so the
+      # key is built from exactly those four.
       - name: Read DuckDB tag and readers
         id: duckdb
         run: |
           tag=$(grep -oE 'DUCKDB_TAG "[^"]+"' cmake/DuckDB.cmake | cut -d'"' -f2)
           readers=$(grep -oE 'DUCKDB_READERS "[^"]+"' cmake/DuckDB.cmake | cut -d'"' -f2)
           test -n "$tag" && test -n "$readers"
-          echo "key=duckdb-${{ runner.os }}-${tag}-${readers//;/-}" >> "$GITHUB_OUTPUT"
+          echo "key=duckdb-${{ runner.os }}-${tag}-${readers//;/-}-${VCPKG_TAG}-${{ hashFiles('cmake/vcpkg/vcpkg.json') }}" >> "$GITHUB_OUTPUT"
 
       - name: Restore DuckDB
         id: duckdb-cache
@@ -45,10 +48,17 @@ jobs:
       # an ordinary build. A second copy of the recipe here is how
       # -DDISABLE_EXTENSION_LOAD=1 once ended up in CI and not in the build
       # the README documents.
+      # The avro and iceberg readers link libraries that vcpkg builds from the
+      # manifest in cmake/vcpkg. vcpkg resolves the manifest's baseline commit
+      # from its own history, so the clone keeps every commit and skips only
+      # file contents it does not need.
       - name: Build DuckDB
         if: steps.duckdb-cache.outputs.cache-hit != 'true'
         run: |
-          cmake -S cmake/duckdb-standalone -B "$DUCKDB_STAGE"
+          git clone --filter=blob:none --branch "$VCPKG_TAG" https://github.com/microsoft/vcpkg "$HOME/vcpkg"
+          "$HOME/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+          cmake -S cmake/duckdb-standalone -B "$DUCKDB_STAGE" \
+            -DVCPKG_TOOLCHAIN_PATH="$HOME/vcpkg/scripts/buildsystems/vcpkg.cmake"
           cmake --build "$DUCKDB_STAGE" --target duckdb_build -j"$(nproc)"
           test -f "$DUCKDB_STAGE/duckdb-install/lib/libduckdb_static.a"
 

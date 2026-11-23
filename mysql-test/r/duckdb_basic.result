@@ -14,7 +14,7 @@ NEGOTIATED_PROTOCOL
 #
 SELECT JSON_EXTRACT(duckdb_status(), '$.readers') AS readers;
 readers
-["core_functions", "httpfs", "json", "parquet"]
+["avro", "core_functions", "httpfs", "iceberg", "json", "parquet"]
 SELECT JSON_UNQUOTE(JSON_EXTRACT(duckdb_status(), '$.engine_error')) = '' AS started_cleanly;
 started_cleanly
 1

@@ -23,14 +23,19 @@
 #
 # DUCKDB_READERS selects which DuckDB extensions are linked in. Every name in
 # the list must be either an in-tree DuckDB extension or a file named
-# <name>.cmake under duckdb/.github/config/extensions/. Only httpfs and json
-# are known to work; the README says where each of the others stops.
+# <name>.cmake under duckdb/.github/config/extensions/. The default four are
+# known to work; the README says where each of the others stops.
+#
+# The avro and iceberg readers link seven libraries that vcpkg builds as
+# static archives, from the manifest in cmake/vcpkg. Building DuckDB with
+# either reader therefore needs VCPKG_TOOLCHAIN_PATH. The archives are
+# installed into the DuckDB tree, so a build that reuses that tree does not.
 
 include(ExternalProject)
 include(FetchContent)
 
 set(DUCKDB_TAG "v2.0.1" CACHE STRING "DuckDB release tag to build against")
-set(DUCKDB_READERS "httpfs;json" CACHE STRING "DuckDB extensions to link in")
+set(DUCKDB_READERS "httpfs;json;avro;iceberg" CACHE STRING "DuckDB extensions to link in")
 set(DUCKDB_PREBUILT_ROOT "" CACHE PATH "Existing DuckDB install prefix to reuse")
 
 # The shared CI action calls cmake with a fixed argument list, so CI passes the
@@ -39,6 +44,9 @@ if(NOT DUCKDB_PREBUILT_ROOT AND DEFINED ENV{DUCKDB_PREBUILT_ROOT})
   set(DUCKDB_PREBUILT_ROOT "$ENV{DUCKDB_PREBUILT_ROOT}")
 endif()
 set(VCPKG_TOOLCHAIN_PATH "" CACHE FILEPATH "vcpkg toolchain, for readers that need it")
+if(NOT VCPKG_TOOLCHAIN_PATH AND DEFINED ENV{VCPKG_ROOT})
+  set(VCPKG_TOOLCHAIN_PATH "$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake")
+endif()
 
 # Static archives DuckDB always produces, in link order. The extension
 # archives are appended per reader below.
@@ -67,6 +75,25 @@ else()
   set(_duckdb_prefix "${CMAKE_CURRENT_BINARY_DIR}/duckdb-install")
 endif()
 
+# Named here rather than left to vcpkg, because the extension has to know the
+# directory the archives land in before DuckDB has been built.
+if("avro" IN_LIST DUCKDB_READERS OR "iceberg" IN_LIST DUCKDB_READERS)
+  set(_duckdb_needs_vcpkg TRUE)
+  if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
+    set(_vcpkg_arch arm64)
+  else()
+    set(_vcpkg_arch x64)
+  endif()
+  if(APPLE)
+    set(_vcpkg_triplet ${_vcpkg_arch}-osx)
+  else()
+    set(_vcpkg_triplet ${_vcpkg_arch}-linux)
+  endif()
+  set(_vcpkg_installed "${_duckdb_prefix}/vcpkg_installed")
+else()
+  set(_duckdb_needs_vcpkg FALSE)
+endif()
+
 # Turn the reader names into archive names. A reader whose archive is missing
 # at link time is a build error, not a silently absent feature.
 set(_duckdb_ext_libs "")
@@ -79,6 +106,15 @@ set(_duckdb_link_libs "")
 foreach(_l IN LISTS _duckdb_ext_libs _duckdb_core_libs)
   list(APPEND _duckdb_link_libs "${_duckdb_prefix}/lib/lib${_l}.a")
 endforeach()
+
+# libavro.a comes from the avro reader's own build. The archive names below
+# are the libraries in cmake/vcpkg/vcpkg.json; change the two lists together.
+if(_duckdb_needs_vcpkg)
+  list(APPEND _duckdb_link_libs "${_duckdb_prefix}/lib/libavro.a")
+  foreach(_l bz2 jansson lzma roaring snappy z zstd)
+    list(APPEND _duckdb_link_libs "${_vcpkg_installed}/${_vcpkg_triplet}/lib/lib${_l}.a")
+  endforeach()
+endif()
 
 if(DUCKDB_PREBUILT_ROOT)
   message(STATUS "DuckDB: reusing prebuilt tree at ${_duckdb_prefix}")
@@ -118,10 +154,29 @@ else()
   if(OPENSSL_ROOT_DIR)
     list(APPEND _duckdb_cmake_args -DOPENSSL_ROOT_DIR=${OPENSSL_ROOT_DIR})
   endif()
+  if(_duckdb_needs_vcpkg AND NOT VCPKG_TOOLCHAIN_PATH)
+    message(FATAL_ERROR "The avro and iceberg readers need vcpkg. Set VCPKG_TOOLCHAIN_PATH "
+                        "to <vcpkg root>/scripts/buildsystems/vcpkg.cmake, or leave both "
+                        "readers out of DUCKDB_READERS.")
+  endif()
   if(VCPKG_TOOLCHAIN_PATH)
     list(APPEND _duckdb_cmake_args
          -DVCPKG_TOOLCHAIN_PATH=${VCPKG_TOOLCHAIN_PATH}
          -DCMAKE_TOOLCHAIN_FILE=${VCPKG_TOOLCHAIN_PATH})
+  endif()
+  # avro-c is older C. It declares function pointers as `int (*)()`, which
+  # C23, GCC 15's default, reads as taking no arguments, and it passes
+  # callbacks whose pointer types GCC 14 and later reject as an error.
+  if("avro" IN_LIST DUCKDB_READERS)
+    list(APPEND _duckdb_cmake_args
+         -DCMAKE_C_STANDARD=17
+         -DCMAKE_C_FLAGS=-Wno-error=incompatible-pointer-types)
+  endif()
+  if(_duckdb_needs_vcpkg)
+    list(APPEND _duckdb_cmake_args
+         -DVCPKG_MANIFEST_DIR=${CMAKE_CURRENT_LIST_DIR}/vcpkg
+         -DVCPKG_INSTALLED_DIR=${_vcpkg_installed}
+         -DVCPKG_TARGET_TRIPLET=${_vcpkg_triplet})
   endif()
 
   ExternalProject_Add(duckdb_build
