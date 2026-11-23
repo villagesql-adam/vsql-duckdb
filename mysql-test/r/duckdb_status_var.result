@@ -20,7 +20,7 @@ ERROR HY000: VDF error in function 'duckdb_scalar': vsql_duckdb: Catalog Error: 
 Did you mean "pg_settings"?
 
 LINE 1: SELECT * FROM does_not_exist_xyz
-                      ^
+                      ^^^^^^^^^^^^^^^^^^
 total_delta
 4
 failed_delta

@@ -92,6 +92,14 @@ SELECT duckdb_scalar('SELECT nosuchfunction()');
 SELECT duckdb_scalar('SELECT 1; SELECT 2');
 
 --echo #
+--echo # A large result is written in linear time. A cell-by-cell read of the
+--echo # result took more than 20 seconds for this many rows
+--echo #
+SET @start = NOW(6);
+SELECT JSON_LENGTH(duckdb_query('SELECT 1 AS n FROM range(120000)')) AS row_count;
+SELECT TIMESTAMPDIFF(SECOND, @start, NOW(6)) < 5 AS fast;
+
+--echo #
 --echo # Cleanup
 --echo #
 

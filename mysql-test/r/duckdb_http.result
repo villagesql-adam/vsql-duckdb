@@ -17,4 +17,16 @@ records
 SELECT duckdb_scalar(@total) AS total;
 total
 15
+#
+# HTTPS works with local files off. The test server speaks plain HTTP,
+# so the TLS handshake fails; what matters is that the request got as far
+# as the handshake, which needs the CA bundle
+#
+SELECT duckdb_scalar(@tls) AS tls;
+ERROR HY000: VDF error in function 'duckdb_scalar': vsql_duckdb: IO Error: <TLS handshake failed>
+#
+# The server shuts down cleanly with the extension holding HTTP clients
+#
+# restart
+Pattern "got signal" not found
 UNINSTALL EXTENSION vsql_duckdb;

@@ -28,7 +28,7 @@ or translates it.
 ## Why C++ and not Rust
 
 The extension is a thin adapter over DuckDB's own C++ objects — `DBConfig`,
-`Connection`, `PendingQueryResult`, `Value`, `LogicalType`. Rust would mean
+`Connection`, `QueryResult`, `Value`, `LogicalType`. Rust would mean
 linking the same C++ static archives into a `cdylib` and reaching those objects
 through the C API or a hand-written shim, which adds a boundary and a second
 build system without changing what the extension can do. Both VillageSQL SDKs
@@ -72,7 +72,7 @@ On macOS add `-DOPENSSL_ROOT_DIR=/opt/homebrew/opt/openssl@3`.
 
 Change any of these only with a reason written into the same commit.
 
-- **`-DDISABLE_EXTENSION_LOAD=1`.** Without it, `INSTALL <reader>` inside a
+- **`-DENABLE_EXTENSION_LOAD=OFF`.** Without it, `INSTALL <reader>` inside a
   caller's query text downloads a shared library from DuckDB's extension
   repository and loads it into `mysqld`. Turning off `autoinstall_known_extensions`
   and `autoload_known_extensions` does NOT stop that; those two only govern

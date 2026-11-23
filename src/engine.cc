@@ -17,6 +17,7 @@
 #include "engine.h"
 
 #include <duckdb.hpp>
+#include <duckdb_static_extension.h>
 
 #include <chrono>
 #include <thread>
@@ -50,7 +51,7 @@ void apply_startup_options(duckdb::DBConfig &config, const Settings &s) {
   }
 
   // The bundle carries every reader it supports. These two stop DuckDB
-  // reaching for one by itself; DISABLE_EXTENSION_LOAD, set when DuckDB is
+  // reaching for one by itself; ENABLE_EXTENSION_LOAD=OFF, set when DuckDB is
   // compiled, is what stops a caller asking for one by name.
   config.SetOptionByName("autoinstall_known_extensions", duckdb::Value::BOOLEAN(false));
   config.SetOptionByName("autoload_known_extensions", duckdb::Value::BOOLEAN(false));
@@ -62,10 +63,30 @@ void apply_startup_options(duckdb::DBConfig &config, const Settings &s) {
   config.SetOptionByName("allow_unredacted_secrets", duckdb::Value::BOOLEAN(false));
 }
 
+// DuckDB loads a reader linked into the binary only once the reader is
+// registered, and nothing in the static archives registers one. The readers
+// this bundle was built with are listed in linked_readers.inc, which
+// cmake/DuckDB.cmake writes from DUCKDB_READERS.
+extern "C" {
+#define VSQL_DUCKDB_READER(name) \
+  int32_t duckdb_extension_##name##_describe(duckdb_extension_descriptor *);
+#include "linked_readers.inc"
+#undef VSQL_DUCKDB_READER
+}
+
+// Registering a reader again is a no-op, and a failed registration makes the
+// next database open fail with DuckDB's own reason, so the return values are
+// not checked here.
+void register_linked_readers() {
+#define VSQL_DUCKDB_READER(name) duckdb_register_static_extension(&duckdb_extension_##name##_describe);
+#include "linked_readers.inc"
+#undef VSQL_DUCKDB_READER
+}
+
 // Refuses a DuckDB that can still fetch and load a reader at run time.
 //
 // The whole security story rests on DuckDB being compiled with
-// DISABLE_EXTENSION_LOAD, because otherwise a caller's own query text can say
+// ENABLE_EXTENSION_LOAD=OFF, because otherwise a caller's own query text can say
 // INSTALL <reader> and make the database pull a shared library off the network
 // and load it into mysqld. A compile flag in a build file is the kind of guard
 // that goes missing quietly -- it did once here, present in the CI recipe and
@@ -79,11 +100,13 @@ std::string check_extension_load_disabled(duckdb::Connection &con) {
   auto res = con.Query("LOAD vsql_duckdb_probe_no_such_reader");
   if (!res->HasError()) {
     return "DuckDB loaded an unknown reader, so this build can load code at "
-           "run time. Rebuild DuckDB with -DDISABLE_EXTENSION_LOAD=1";
+           "run time. Rebuild DuckDB with -DENABLE_EXTENSION_LOAD=OFF";
   }
+  // DuckDB 2.0 leaves the loading code out of the link and puts a stub in its
+  // place, which refuses install and load with this hint.
   const std::string error = res->GetError();
-  if (error.find("compile time flag") == std::string::npos) {
-    return "DuckDB was built without -DDISABLE_EXTENSION_LOAD=1, so a query "
+  if (error.find("does not link the loadable_extensions library") == std::string::npos) {
+    return "DuckDB was built without -DENABLE_EXTENSION_LOAD=OFF, so a query "
            "could install and load code into the server. Rebuild DuckDB with "
            "that flag. The engine refused the probe with: " +
            error;
@@ -108,6 +131,19 @@ std::string seal(duckdb::Connection &con, const Settings &s) {
   // also stops DuckDB spilling to disk. A query that needs more than
   // memory_limit_mb then fails instead of writing to the server's filesystem.
   if (!s.allow_local_files) {
+    // httpfs reads the system CA bundle through DuckDB's own filesystem and
+    // keeps it for the life of the instance, so it has to read it before the
+    // local filesystem goes. Any HTTPS request makes it read the bundle, so
+    // this one goes to a closed local port and is expected to fail. Retries
+    // are off for this session only; httpfs would otherwise back off for
+    // about a second while every query waits on the engine lock.
+    if (s.enable_external_access) {
+      con.Query("SET SESSION http_retries = 0");
+      // A firewall that drops rather than refuses the packet would otherwise
+      // hold every query for httpfs's default 30 second timeout.
+      con.Query("SET SESSION http_timeout = 1");
+      con.Query("SELECT 1 FROM read_blob('https://127.0.0.1:1/')");
+    }
     auto res = con.Query("SET disabled_filesystems = 'LocalFileSystem'");
     if (res->HasError()) return res->GetError();
   }
@@ -165,7 +201,20 @@ Engine &Engine::get() {
   return engine;
 }
 
+void Engine::start() {
+  std::lock_guard<std::mutex> lock(mu_);
+  shut_down_ = false;
+}
+
+void Engine::shutdown() {
+  std::lock_guard<std::mutex> lock(mu_);
+  shut_down_ = true;
+  db_.reset();
+  built_ = false;
+}
+
 Engine::Acquired Engine::acquire_locked(const Settings &settings) {
+  if (shut_down_) return {nullptr, "vsql_duckdb is unloading"};
   if (built_ && settings.same_instance_as(built_from_)) {
     // A credential that failed earlier is retried against the running
     // instance rather than remembered. Otherwise an operator who named a
@@ -191,6 +240,7 @@ Engine::Acquired Engine::acquire_locked(const Settings &settings) {
   try {
     duckdb::DBConfig config;
     apply_startup_options(config, settings);
+    register_linked_readers();
     auto db = std::make_shared<duckdb::DuckDB>(nullptr, &config);
     duckdb::Connection setup(*db);
 
@@ -198,13 +248,15 @@ Engine::Acquired Engine::acquire_locked(const Settings &settings) {
     // away, so they run first.
     auto version = setup.Query("SELECT version()");
     if (!version->HasError() && version->RowCount() == 1) {
-      duckdb_version_ = version->GetValue(0, 0).ToString();
+      duckdb_version_ = version->Collection().GetValue(0, 0).ToString();
     }
     auto readers =
         setup.Query("SELECT extension_name FROM duckdb_extensions() WHERE loaded ORDER BY 1");
     if (!readers->HasError()) {
-      for (size_t row = 0; row < readers->RowCount(); ++row) {
-        readers_.push_back(readers->GetValue(0, row).ToString());
+      for (auto &chunk : readers->Collection().Chunks()) {
+        for (size_t row = 0; row < chunk.size(); ++row) {
+          readers_.push_back(chunk.GetValue(0, row).ToString());
+        }
       }
     }
 
@@ -254,45 +306,38 @@ Engine::Outcome Engine::run(const std::string &sql, const Settings &settings) {
   out.db = acquired.db;
 
   duckdb::Connection con(*out.db);
-  auto pending = con.PendingQuery(sql);
-  if (pending->HasError()) {
-    out.error = pending->GetError();
+  auto result = con.Submit(sql);
+  if (result->HasError()) {
+    out.error = result->GetError();
     return out;
   }
+  result->Materialize();
 
   const auto deadline =
       std::chrono::steady_clock::now() + std::chrono::milliseconds(settings.timeout_ms);
   for (;;) {
-    auto state = pending->ExecuteTask();
-    // IsResultReady() is also true once execution has failed, so the error
-    // state has to be taken before Execute() is called on a dead result.
-    if (state == duckdb::PendingExecutionResult::EXECUTION_ERROR) {
-      out.error = pending->GetError();
+    auto state = result->ExecuteTask();
+    if (state == duckdb::QueryResultState::EXECUTION_ERROR) {
+      out.error = result->GetError();
       return out;
     }
-    if (duckdb::PendingQueryResult::IsResultReady(state)) break;
+    if (state == duckdb::QueryResultState::FINISHED) break;
     if (settings.timeout_ms > 0 && std::chrono::steady_clock::now() >= deadline) {
       con.Interrupt();
       out.error = "query passed vsql_duckdb.timeout_ms (" +
                   std::to_string(settings.timeout_ms) + " ms) and was stopped";
       return out;
     }
-    // RESULT_NOT_READY is the one state that means this thread just did work,
+    // NOT_READY is the one state that means this thread just did work,
     // so it is the one state worth looping on immediately. Sleeping on
     // everything else keeps a future DuckDB state from turning this into a
     // spin that holds a server thread against a busy core.
-    if (state != duckdb::PendingExecutionResult::RESULT_NOT_READY) {
+    if (state != duckdb::QueryResultState::NOT_READY) {
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
   }
 
-  auto result = pending->Execute();
-  if (result->HasError()) {
-    out.error = result->GetError();
-    return out;
-  }
-  out.result = duckdb::unique_ptr_cast<duckdb::QueryResult, duckdb::MaterializedQueryResult>(
-      std::move(result));
+  out.result = std::move(result);
   return out;
 }
 

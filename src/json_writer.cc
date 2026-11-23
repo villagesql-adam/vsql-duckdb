@@ -80,10 +80,9 @@ void append_json_string(std::string_view value, std::string &out) {
   out.push_back('"');
 }
 
-std::string write_rows_json(duckdb::MaterializedQueryResult &result, size_t max_bytes,
+std::string write_rows_json(duckdb::QueryResult &result, size_t max_bytes,
                             std::string &out) {
-  const size_t columns = result.names.size();
-  const size_t rows = result.RowCount();
+  const size_t columns = result.GetNames().size();
 
   // Escaping a column name and classifying its type give the same answer on
   // every row, so both happen once here rather than once per cell.
@@ -91,9 +90,9 @@ std::string write_rows_json(duckdb::MaterializedQueryResult &result, size_t max_
   std::vector<Shape> shapes(columns);
   for (size_t col = 0; col < columns; ++col) {
     if (col > 0) keys[col].push_back(',');
-    append_json_string(result.names[col], keys[col]);
+    append_json_string(result.GetNames()[col].GetIdentifierName(), keys[col]);
     keys[col].push_back(':');
-    shapes[col] = shape_of(result.types[col].id());
+    shapes[col] = shape_of(result.GetTypes()[col].id());
   }
 
   out.clear();
@@ -106,44 +105,50 @@ std::string write_rows_json(duckdb::MaterializedQueryResult &result, size_t max_
   // is exactly the bracket that makes it parse.
   const size_t reserved = 2;
 
-  for (size_t row = 0; row < rows; ++row) {
-    if (row > 0) out.push_back(',');
-    out.push_back('{');
-    for (size_t col = 0; col < columns; ++col) {
-      out += keys[col];
+  // Read a chunk at a time. ColumnDataCollection::GetValue() rebuilds every
+  // row on each call, which makes a cell-by-cell walk quadratic in the row
+  // count and puts it outside the query deadline.
+  size_t row = 0;
+  for (auto &chunk : result.Collection().Chunks()) {
+    for (size_t in_chunk = 0; in_chunk < chunk.size(); ++in_chunk, ++row) {
+      if (row > 0) out.push_back(',');
+      out.push_back('{');
+      for (size_t col = 0; col < columns; ++col) {
+        out += keys[col];
 
-      duckdb::Value value = result.GetValue(col, row);
-      if (value.IsNull()) {
-        out += "null";
-      } else if (shapes[col] == Shape::kBoolean) {
-        out += value.GetValue<bool>() ? "true" : "false";
-      } else {
-        const std::string text = value.ToString();
-        // Checked before appending, so one enormous value cannot grow the
-        // buffer far past the cap before anything notices.
-        if (out.size() + text.size() + reserved > max_bytes) {
+        duckdb::Value value = chunk.GetValue(col, in_chunk);
+        if (value.IsNull()) {
+          out += "null";
+        } else if (shapes[col] == Shape::kBoolean) {
+          out += value.GetValue<bool>() ? "true" : "false";
+        } else {
+          const std::string text = value.ToString();
+          // Checked before appending, so one enormous value cannot grow the
+          // buffer far past the cap before anything notices.
+          if (out.size() + text.size() + reserved > max_bytes) {
+            return "reached " + std::to_string(max_bytes) + " bytes at row " +
+                   std::to_string(row + 1);
+          }
+          // JSON has no spelling for nan or inf, so a float carrying either is
+          // written as a string rather than as an invalid bare token.
+          const bool numeric =
+              shapes[col] == Shape::kNumber ||
+              (shapes[col] == Shape::kFloating && std::isfinite(value.GetValue<double>()));
+          if (numeric) {
+            out += text;
+          } else {
+            append_json_string(text, out);
+          }
+        }
+
+        // Escaping can grow a value past what the check above allowed for.
+        if (out.size() + reserved > max_bytes) {
           return "reached " + std::to_string(max_bytes) + " bytes at row " +
                  std::to_string(row + 1);
         }
-        // JSON has no spelling for nan or inf, so a float carrying either is
-        // written as a string rather than as an invalid bare token.
-        const bool numeric =
-            shapes[col] == Shape::kNumber ||
-            (shapes[col] == Shape::kFloating && std::isfinite(value.GetValue<double>()));
-        if (numeric) {
-          out += text;
-        } else {
-          append_json_string(text, out);
-        }
       }
-
-      // Escaping can grow a value past what the check above allowed for.
-      if (out.size() + reserved > max_bytes) {
-        return "reached " + std::to_string(max_bytes) + " bytes at row " +
-               std::to_string(row + 1);
-      }
+      out.push_back('}');
     }
-    out.push_back('}');
   }
 
   out.push_back(']');

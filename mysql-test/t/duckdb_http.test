@@ -100,6 +100,28 @@ SET @total = CONCAT('SELECT sum(n) FROM read_json(''', @url, ''')');
 --enable_query_log
 SELECT duckdb_scalar(@total) AS total;
 
+--echo #
+--echo # HTTPS works with local files off. The test server speaks plain HTTP,
+--echo # so the TLS handshake fails; what matters is that the request got as far
+--echo # as the handshake, which needs the CA bundle
+--echo #
+
+--disable_query_log
+eval SET @tls = CONCAT('SELECT length(content) FROM read_text(''https://127.0.0.1:', $http_port, '/duckdb_cities.json'')');
+--enable_query_log
+--replace_regex /IO Error: .*/IO Error: <TLS handshake failed>/
+--error ER_UDF_ERROR
+SELECT duckdb_scalar(@tls) AS tls;
+
+--echo #
+--echo # The server shuts down cleanly with the extension holding HTTP clients
+--echo #
+
+--source include/restart_mysqld.inc
+--let SEARCH_FILE = $MYSQLTEST_VARDIR/log/mysqld.1.err
+--let SEARCH_PATTERN = got signal
+--source include/search_pattern.inc
+
 # Kill the server by PID; stop_http.sh was written by the server child.
 --exec sh $MYSQLTEST_VARDIR/tmp/stop_http.sh 2>/dev/null || true
 --remove_file $MYSQLTEST_VARDIR/tmp/stop_http.sh

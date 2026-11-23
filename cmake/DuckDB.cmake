@@ -18,8 +18,8 @@
 #
 # Set DUCKDB_PREBUILT_ROOT to reuse a DuckDB tree that was already built with
 # the same options; otherwise DuckDB is fetched at DUCKDB_TAG and built here.
-# DUCKDB_READERS then has to name exactly that tree's readers, because its
-# generated loader refers to every one of them.
+# DUCKDB_READERS then has to name only readers that tree was built with,
+# because the extension links one archive for each name.
 #
 # DUCKDB_READERS selects which DuckDB extensions are linked in. Every name in
 # the list must be either an in-tree DuckDB extension or a file named
@@ -29,7 +29,7 @@
 include(ExternalProject)
 include(FetchContent)
 
-set(DUCKDB_TAG "v1.5.6" CACHE STRING "DuckDB release tag to build against")
+set(DUCKDB_TAG "v2.0.1" CACHE STRING "DuckDB release tag to build against")
 set(DUCKDB_READERS "httpfs;json" CACHE STRING "DuckDB extensions to link in")
 set(DUCKDB_PREBUILT_ROOT "" CACHE PATH "Existing DuckDB install prefix to reuse")
 
@@ -44,14 +44,13 @@ set(VCPKG_TOOLCHAIN_PATH "" CACHE FILEPATH "vcpkg toolchain, for readers that ne
 # archives are appended per reader below.
 set(_duckdb_core_libs
     duckdb_static
-    duckdb_generated_extension_loader
+    duckdb_cpp_api
     duckdb_fastpforlib
     duckdb_fmt
     duckdb_fsst
     duckdb_hyperloglog
     duckdb_mbedtls
     duckdb_miniz
-    duckdb_pg_query
     duckdb_re2
     duckdb_skiplistlib
     duckdb_utf8proc
@@ -104,7 +103,7 @@ else()
       # they only stop DuckDB reaching for a reader by itself. The extension
       # refuses to serve queries if it finds this was left off -- see
       # check_extension_load_disabled() in src/engine.cc.
-      -DDISABLE_EXTENSION_LOAD=1
+      -DENABLE_EXTENSION_LOAD=OFF
       # A second allocator inside mysqld is not acceptable.
       -DENABLE_JEMALLOC=OFF
       -DCMAKE_POSITION_INDEPENDENT_CODE=ON
@@ -139,12 +138,23 @@ else()
       UPDATE_DISCONNECTED TRUE)
 endif()
 
+# The extension registers each linked reader with DuckDB by name, from this list.
+set(_duckdb_reader_names ${DUCKDB_READERS} ${_duckdb_always_linked})
+list(REMOVE_DUPLICATES _duckdb_reader_names)
+set(_duckdb_reader_inc "")
+foreach(_r IN LISTS _duckdb_reader_names)
+  string(APPEND _duckdb_reader_inc "VSQL_DUCKDB_READER(${_r})\n")
+endforeach()
+file(CONFIGURE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/generated/linked_readers.inc"
+     CONTENT "${_duckdb_reader_inc}")
+
 add_library(duckdb_static INTERFACE)
+target_include_directories(duckdb_static INTERFACE "${CMAKE_CURRENT_BINARY_DIR}/generated")
 add_dependencies(duckdb_static duckdb_build)
 target_include_directories(duckdb_static SYSTEM INTERFACE "${_duckdb_prefix}/include")
 
-# The loader archive calls into each reader archive and every reader calls back
-# into libduckdb_static.a, so no single order satisfies GNU ld's one pass.
+# These archives refer to one another, and GNU ld reads each archive once, in
+# order. The group makes it search them all until nothing is left unresolved.
 # Apple's linker resolves to closure and rejects --start-group.
 if(APPLE)
   target_link_libraries(duckdb_static INTERFACE ${_duckdb_link_libs})
@@ -159,3 +169,7 @@ find_package(OpenSSL REQUIRED)
 find_package(CURL REQUIRED)
 target_link_libraries(duckdb_static INTERFACE OpenSSL::SSL OpenSSL::Crypto CURL::libcurl)
 
+# httpfs reads the system certificate store on macOS.
+if(APPLE)
+  target_link_libraries(duckdb_static INTERFACE "-framework CoreFoundation" "-framework Security")
+endif()
