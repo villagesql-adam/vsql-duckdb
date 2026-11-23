@@ -1,0 +1,14 @@
+{
+  "name": "vsql-duckdb-readers",
+  "description": "Static libraries that the avro and iceberg readers link. The iceberg reader's own manifest also lists aws-sdk-cpp, which its build does not use. avro-c turns on its bzip2 and zstd codecs whenever it finds those libraries, so both are listed to make every build find the same ones.",
+  "dependencies": [
+    "bzip2",
+    "jansson",
+    "liblzma",
+    "roaring",
+    "snappy",
+    "zlib",
+    "zstd"
+  ],
+  "builtin-baseline": "cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3"
+}

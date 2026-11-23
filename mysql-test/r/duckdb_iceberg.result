@@ -1,0 +1,44 @@
+INSTALL EXTENSION vsql_duckdb;
+#
+# The bundle carries the iceberg reader and the avro reader it needs
+#
+SELECT JSON_CONTAINS(JSON_EXTRACT(duckdb_status(), '$.readers'), '["avro", "iceberg"]') AS has_readers;
+has_readers
+1
+SET GLOBAL vsql_duckdb.allow_local_files = ON;
+#
+# The current snapshot holds all six orders
+#
+SELECT duckdb_query(CONCAT('SELECT count(*) AS n, sum(amount) AS total FROM ', @scan)) AS current_rows;
+current_rows
+[{"n":6,"total":82.5}]
+#
+# Both snapshots are listed
+#
+SELECT duckdb_scalar(CONCAT('SELECT count(*) FROM ', @snapshots)) AS snapshots;
+snapshots
+2
+#
+# A grouped total comes back as rows through JSON_TABLE
+#
+SELECT jt.region, jt.total
+FROM JSON_TABLE(
+duckdb_query(CONCAT('SELECT region, sum(amount) AS total FROM ', @scan, ' GROUP BY region')),
+'$[*]' COLUMNS (region VARCHAR(10) PATH '$.region', total DOUBLE PATH '$.total')) AS jt
+ORDER BY jt.total DESC;
+region	total
+east	42.5
+west	35
+north	5
+#
+# With local files off, the table cannot be read
+#
+SET GLOBAL vsql_duckdb.allow_local_files = OFF;
+SELECT duckdb_query(CONCAT('SELECT count(*) FROM ', @scan)) AS refused;
+ERROR HY000: VDF error in function 'duckdb_query': vsql_duckdb: Permission Error: File system LocalFileSystem has been disabled by configuration
+#
+# With local files off, an Iceberg table cannot be written to disk
+#
+SELECT duckdb_query(@copy) AS refused;
+ERROR HY000: VDF error in function 'duckdb_query': vsql_duckdb: Permission Error: File system LocalFileSystem has been disabled by configuration
+UNINSTALL EXTENSION vsql_duckdb;

@@ -8,7 +8,8 @@ paths and is not checked in.
 ## What this extension is
 
 `vsql_duckdb` embeds DuckDB inside the VillageSQL server process so a caller
-can aggregate Parquet, CSV and JSON files held in object storage over an
+can aggregate Parquet, CSV and JSON files and Iceberg tables held in object
+storage over an
 ordinary MySQL connection. It is a port of the PostgreSQL extension
 `pg_duckdb`, narrowed to what the VillageSQL Extension Framework supports
 today. The tracking issue is
@@ -50,9 +51,9 @@ deciding factor.
 
 ## Building
 
-DuckDB is the only dependency that is not already on a machine that builds
-VillageSQL. `cmake/DuckDB.cmake` fetches and builds it, or reuses a tree you
-built earlier:
+DuckDB and vcpkg are the two dependencies that are not already on a machine
+that builds VillageSQL. `cmake/DuckDB.cmake` fetches and builds DuckDB, or
+reuses a tree you built earlier:
 
 ```bash
 export VillageSQL_BUILD_DIR=/path/to/villagesql/build
@@ -63,8 +64,13 @@ cmake --install build
 
 `-DDUCKDB_PREBUILT_ROOT=<prefix>` skips the DuckDB build and links against an
 existing one. `-DDUCKDB_READERS=...` chooses which DuckDB readers are linked
-in; the default is `httpfs;json`, and `parquet` and `core_functions` are always
-present.
+in; the default is `httpfs;json;avro;iceberg`, and `parquet` and
+`core_functions` are always present.
+
+Building DuckDB with `avro` or `iceberg` needs vcpkg. Set `VCPKG_ROOT`, or pass
+`-DVCPKG_TOOLCHAIN_PATH=<vcpkg root>/scripts/buildsystems/vcpkg.cmake`. vcpkg
+builds the seven libraries in `cmake/vcpkg/vcpkg.json` as static archives into
+the DuckDB tree, so a build that reuses the tree does not need vcpkg.
 
 On macOS add `-DOPENSSL_ROOT_DIR=/opt/homebrew/opt/openssl@3`.
 
@@ -128,6 +134,13 @@ Each test carries its own `<name>-master.opt` turning on
 `vsql_allow_preview_extensions`, because a `suite.opt` is ignored when MTR runs
 with `--suite=<path>`.
 
+`duckdb_iceberg.test` reads a two-snapshot table that PyIceberg wrote, because
+the tables people read come from other engines. DuckDB's own
+`COPY ... (FORMAT iceberg)` writes only a new table with one snapshot. No
+mysqltest variable holds this suite's path, so the table travels as base64 in
+`mysql-test/t/iceberg_orders.inc`. `mysql-test/std_data/make_iceberg_orders.py`
+writes that file again; its header says how to install PyIceberg for it.
+
 `duckdb_guards.test` is the one to keep honest. Every assertion in it stands
 for a way a caller could reach past the engine, and each was written after
 checking that the guard actually holds — one of them only after finding that it
@@ -162,6 +175,10 @@ did not.
 - **`disabled_filesystems` cannot be set before the DuckDB instance starts.**
   It goes on the setup connection, along with `lock_configuration`, which must
   be last.
+- **avro-c turns on a compression codec for every library it finds.** List
+  every library a reader looks for in `cmake/vcpkg/vcpkg.json`. One that is
+  not listed is found on the build machine, if at all, and the extension then
+  fails to link or links a library the server host may not have.
 - **Local file access and disk spilling are one DuckDB switch.** Turning off
   `allow_local_files` also stops DuckDB spilling, so a query over
   `memory_limit_mb` fails rather than writing to disk.
