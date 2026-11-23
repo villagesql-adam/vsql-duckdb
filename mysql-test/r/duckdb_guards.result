@@ -6,7 +6,7 @@ SELECT duckdb_scalar('SELECT count(*) FROM read_csv(''/etc/hosts'')');
 ERROR HY000: VDF error in function 'duckdb_scalar': vsql_duckdb: Permission Error: File system LocalFileSystem has been disabled by configuration
 
 LINE 1: SELECT count(*) FROM read_csv('/etc/hosts')
-                             ^
+                             ^^^^^^^^^^^^^^^^^^^^^^
 #
 # Query text cannot loosen the engine it runs in
 #
@@ -24,9 +24,9 @@ ERROR HY000: VDF error in function 'duckdb_query': vsql_duckdb: Invalid Input Er
 #
 SET GLOBAL vsql_duckdb.allow_local_files = ON;
 SELECT duckdb_query('INSTALL spatial');
-ERROR HY000: VDF error in function 'duckdb_query': vsql_duckdb: Permission Error: Installing external extensions is disabled through a compile time flag
+ERROR HY000: VDF error in function 'duckdb_query': vsql_duckdb: Permission Error: Installing external extensions is not supported: this build does not link the loadable_extensions library
 SELECT duckdb_query('LOAD spatial');
-ERROR HY000: VDF error in function 'duckdb_query': vsql_duckdb: Permission Error: Loading external extensions is disabled through a compile time flag
+ERROR HY000: VDF error in function 'duckdb_query': vsql_duckdb: Permission Error: Loading external extensions is not supported: this build does not link the loadable_extensions library
 #
 # A function belonging to an unbundled reader stays out of the catalog
 #
@@ -49,12 +49,12 @@ SELECT duckdb_scalar('SELECT count(*) FROM read_text(''https://example.com/'')')
 ERROR HY000: VDF error in function 'duckdb_scalar': vsql_duckdb: Permission Error: Cannot access file "https://example.com/" - file system operations are disabled by configuration
 
 LINE 1: SELECT count(*) FROM read_text('https://example.com/')
-                             ^
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 SELECT duckdb_scalar('SELECT count(*) FROM read_parquet(''s3://a-bucket/x.parquet'')');
 ERROR HY000: VDF error in function 'duckdb_scalar': vsql_duckdb: Permission Error: Cannot access file "s3://a-bucket/x.parquet" - file system operations are disabled by configuration
 
 LINE 1: SELECT count(*) FROM read_parquet('s3://a-bucket/x.parquet')
-                             ^
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 SET GLOBAL vsql_duckdb.enable_external_access = DEFAULT;
 #
 # The object storage credential cannot be printed
@@ -63,7 +63,7 @@ SELECT duckdb_query('SELECT * FROM duckdb_secrets(redact=false)');
 ERROR HY000: VDF error in function 'duckdb_query': vsql_duckdb: Invalid Input Error: Displaying unredacted secrets is disabled
 
 LINE 1: SELECT * FROM duckdb_secrets(redact=false)
-                      ^
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 #
 # Naming a keyring secret that cannot be read fails loudly, and says
 # which variable to look at. A secret stored with keyring_key_store()

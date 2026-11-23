@@ -95,12 +95,23 @@ ERROR HY000: VDF error in function 'duckdb_scalar': vsql_duckdb: Catalog Error: 
 Did you mean <a similar name>
 
 LINE 1: SELECT nosuchfunction()
-               ^
+               ^^^^^^^^^^^^^^^^
 #
 # Only one statement per call
 #
 SELECT duckdb_scalar('SELECT 1; SELECT 2');
 ERROR HY000: VDF error in function 'duckdb_scalar': vsql_duckdb: Invalid Input Error: Cannot prepare multiple statements at once!
+#
+# A large result is written in linear time. A cell-by-cell read of the
+# result took more than 20 seconds for this many rows
+#
+SET @start = NOW(6);
+SELECT JSON_LENGTH(duckdb_query('SELECT 1 AS n FROM range(120000)')) AS row_count;
+row_count
+120000
+SELECT TIMESTAMPDIFF(SECOND, @start, NOW(6)) < 5 AS fast;
+fast
+1
 #
 # Cleanup
 #

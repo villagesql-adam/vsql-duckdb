@@ -26,7 +26,7 @@
 
 namespace duckdb {
 class DuckDB;
-class MaterializedQueryResult;
+class QueryResult;
 }  // namespace duckdb
 
 namespace vsql_duckdb {
@@ -47,7 +47,7 @@ class Engine {
     // at any moment, so the caller has to keep this one alive for as long as
     // it reads the result.
     std::shared_ptr<duckdb::DuckDB> db;
-    std::unique_ptr<duckdb::MaterializedQueryResult> result;
+    std::unique_ptr<duckdb::QueryResult> result;
     std::string error;
 
     bool ok() const { return result != nullptr; }
@@ -71,6 +71,14 @@ class Engine {
   // usually goes on to disable.
   Info info(const Settings &settings);
 
+  // Releases the instance while the server is unloading the extension, and
+  // refuses to build another until start() runs again. The httpfs reader
+  // keeps a function-static mutex that the C++ runtime destroys at exit
+  // before it destroys this object, so an instance left for the static
+  // destructor locks a dead mutex and aborts mysqld.
+  void start();
+  void shutdown();
+
  private:
   struct Acquired {
     std::shared_ptr<duckdb::DuckDB> db;  // null when the instance failed to start
@@ -85,6 +93,7 @@ class Engine {
   std::shared_ptr<duckdb::DuckDB> db_;
   Settings built_from_;
   bool built_ = false;
+  bool shut_down_ = false;
   std::string build_error_;   // the instance itself is unusable
   std::string secret_error_;  // the instance is fine, the credential is not
   std::string duckdb_version_;

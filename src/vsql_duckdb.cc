@@ -104,12 +104,18 @@ void duckdb_scalar_impl(StringArg sql, StringResult out) try {
     report(out, outcome.error);
     return;
   }
-  if (outcome.result->RowCount() == 0 || outcome.result->names.empty()) {
+  if (outcome.result->RowCount() == 0 || outcome.result->GetNames().empty()) {
     vsql_duckdb::note_query_ok();
     out.set_null();
     return;
   }
-  duckdb::Value value = outcome.result->GetValue(0, 0);
+  // The first chunk holds the first row. Collection().GetValue() would copy
+  // every row of the result to read this one cell.
+  duckdb::Value value;
+  for (auto &chunk : outcome.result->Collection().Chunks()) {
+    value = chunk.GetValue(0, 0);
+    break;
+  }
   if (value.IsNull()) {
     vsql_duckdb::note_query_ok();
     out.set_null();
@@ -216,10 +222,16 @@ void duckdb_status_impl(StringResult out) try {
   report(out, "unknown failure");
 }
 
+void on_init() { Engine::get().start(); }
+
+void on_deinit() { Engine::get().shutdown(); }
+
 }  // namespace
 
 VEF_GENERATE_ENTRY_POINTS(
     make_extension()
+        .on_init<&on_init>()
+        .on_deinit<&on_deinit>()
         .with(vsql_duckdb::g_sys_vars)
         .with(vsql_duckdb::g_keyring)
         .with(vsql_duckdb::g_status_vars)

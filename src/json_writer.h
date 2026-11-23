@@ -22,7 +22,7 @@
 #include <string_view>
 
 namespace duckdb {
-class MaterializedQueryResult;
+class QueryResult;
 }
 
 namespace vsql_duckdb {
@@ -39,7 +39,7 @@ namespace vsql_duckdb {
 //
 // max_bytes bounds the finished array, closing bracket included, so a caller
 // may hand the result straight to a buffer of exactly that size.
-std::string write_rows_json(duckdb::MaterializedQueryResult &result, size_t max_bytes,
+std::string write_rows_json(duckdb::QueryResult &result, size_t max_bytes,
                             std::string &out);
 
 // Appends `value` to `out` as a JSON string literal, quotes included.

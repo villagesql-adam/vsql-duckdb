@@ -29,7 +29,7 @@
 include(ExternalProject)
 include(FetchContent)
 
-set(DUCKDB_TAG "v1.5.6" CACHE STRING "DuckDB release tag to build against")
+set(DUCKDB_TAG "v2.0.1" CACHE STRING "DuckDB release tag to build against")
 set(DUCKDB_READERS "httpfs;json" CACHE STRING "DuckDB extensions to link in")
 set(DUCKDB_PREBUILT_ROOT "" CACHE PATH "Existing DuckDB install prefix to reuse")
 
@@ -44,14 +44,13 @@ set(VCPKG_TOOLCHAIN_PATH "" CACHE FILEPATH "vcpkg toolchain, for readers that ne
 # archives are appended per reader below.
 set(_duckdb_core_libs
     duckdb_static
-    duckdb_generated_extension_loader
+    duckdb_cpp_api
     duckdb_fastpforlib
     duckdb_fmt
     duckdb_fsst
     duckdb_hyperloglog
     duckdb_mbedtls
     duckdb_miniz
-    duckdb_pg_query
     duckdb_re2
     duckdb_skiplistlib
     duckdb_utf8proc
@@ -104,7 +103,7 @@ else()
       # they only stop DuckDB reaching for a reader by itself. The extension
       # refuses to serve queries if it finds this was left off -- see
       # check_extension_load_disabled() in src/engine.cc.
-      -DDISABLE_EXTENSION_LOAD=1
+      -DENABLE_EXTENSION_LOAD=OFF
       # A second allocator inside mysqld is not acceptable.
       -DENABLE_JEMALLOC=OFF
       -DCMAKE_POSITION_INDEPENDENT_CODE=ON
@@ -139,7 +138,18 @@ else()
       UPDATE_DISCONNECTED TRUE)
 endif()
 
+# The extension registers each linked reader with DuckDB by name, from this list.
+set(_duckdb_reader_names ${DUCKDB_READERS} ${_duckdb_always_linked})
+list(REMOVE_DUPLICATES _duckdb_reader_names)
+set(_duckdb_reader_inc "")
+foreach(_r IN LISTS _duckdb_reader_names)
+  string(APPEND _duckdb_reader_inc "VSQL_DUCKDB_READER(${_r})\n")
+endforeach()
+file(CONFIGURE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/generated/linked_readers.inc"
+     CONTENT "${_duckdb_reader_inc}")
+
 add_library(duckdb_static INTERFACE)
+target_include_directories(duckdb_static INTERFACE "${CMAKE_CURRENT_BINARY_DIR}/generated")
 add_dependencies(duckdb_static duckdb_build)
 target_include_directories(duckdb_static SYSTEM INTERFACE "${_duckdb_prefix}/include")
 
@@ -159,3 +169,7 @@ find_package(OpenSSL REQUIRED)
 find_package(CURL REQUIRED)
 target_link_libraries(duckdb_static INTERFACE OpenSSL::SSL OpenSSL::Crypto CURL::libcurl)
 
+# httpfs reads the system certificate store on macOS.
+if(APPLE)
+  target_link_libraries(duckdb_static INTERFACE "-framework CoreFoundation" "-framework Security")
+endif()
