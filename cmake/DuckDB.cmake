@@ -18,8 +18,8 @@
 #
 # Set DUCKDB_PREBUILT_ROOT to reuse a DuckDB tree that was already built with
 # the same options; otherwise DuckDB is fetched at DUCKDB_TAG and built here.
-# DUCKDB_READERS then has to name exactly that tree's readers, because its
-# generated loader refers to every one of them.
+# DUCKDB_READERS then has to name only readers that tree was built with,
+# because the extension links one archive for each name.
 #
 # DUCKDB_READERS selects which DuckDB extensions are linked in. Every name in
 # the list must be either an in-tree DuckDB extension or a file named
@@ -153,8 +153,8 @@ target_include_directories(duckdb_static INTERFACE "${CMAKE_CURRENT_BINARY_DIR}/
 add_dependencies(duckdb_static duckdb_build)
 target_include_directories(duckdb_static SYSTEM INTERFACE "${_duckdb_prefix}/include")
 
-# The loader archive calls into each reader archive and every reader calls back
-# into libduckdb_static.a, so no single order satisfies GNU ld's one pass.
+# These archives refer to one another, and GNU ld reads each archive once, in
+# order. The group makes it search them all until nothing is left unresolved.
 # Apple's linker resolves to closure and rejects --start-group.
 if(APPLE)
   target_link_libraries(duckdb_static INTERFACE ${_duckdb_link_libs})
