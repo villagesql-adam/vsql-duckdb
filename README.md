@@ -534,7 +534,7 @@ SELECT duckdb_query('SELECT repeat(''x'', 5000) AS s') AS v;
 
 Measured with `kQueryBufferSize = 1048576`, `SHOW CREATE TABLE materialized`
 reports `v` as `longtext`. A result past that ceiling still does not store:
-`duckdb_query` itself raises the same "result ... exceeds ... the limit set by
+`duckdb_query` itself raises the same "result reached ... the limit set by
 vsql_duckdb.max_result_bytes" error it would raise on its own (see
 [Returning more than one megabyte](#returning-more-than-one-megabyte)), rather
 than a silent or a mid-row truncation.

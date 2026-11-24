@@ -18,4 +18,15 @@ SELECT LENGTH(v) > 5000 AS result_not_truncated FROM materialized_query;
 result_not_truncated
 1
 DROP TABLE materialized_query;
+CREATE TABLE materialized_scalar AS
+SELECT duckdb_scalar('SELECT repeat(''x'', 5000)') AS v;
+SELECT LENGTH(v) AS scalar_length FROM materialized_scalar;
+scalar_length
+5000
+DROP TABLE materialized_scalar;
+CREATE TABLE materialized_status AS SELECT duckdb_status() AS v;
+SELECT JSON_VALID(v) AS status_is_json FROM materialized_status;
+status_is_json
+1
+DROP TABLE materialized_status;
 UNINSTALL EXTENSION vsql_duckdb;
